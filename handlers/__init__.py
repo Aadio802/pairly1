@@ -1,14 +1,15 @@
 """
-Handler registration
+Complete handler registration
 """
-from aiogram import Dispatcher, Router, F
+from aiogram import Dispatcher, Router, F, BaseMiddleware
 from aiogram.filters import Command, CommandStart
 from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from typing import Callable, Dict, Any, Awaitable
 
 # Import database modules
 from db.users import (
-    user_exists, create_user, get_user_state, 
+    user_exists, create_user, get_user_state, get_user,
     transition_state, UserState, get_partner, is_premium
 )
 from db.matchmaking import (
@@ -18,17 +19,47 @@ from db.matchmaking import (
 from db.ratings import get_average_rating, get_pending_ratings, add_rating
 from db.sunflowers import get_sunflower_balance, add_sunflowers
 from db.streaks import update_streak, get_streak_days
-from db.pets import get_pets, add_pet, get_pet_count
+from db.moderation import is_banned
 from services.matcher import find_best_match, create_match
 from config import settings
 
-# Create routers
-start_router = Router()
-matchmaking_router = Router()
-rating_router = Router()
+
+# ============ MIDDLEWARE ============
+class BanCheckMiddleware(BaseMiddleware):
+    """Check if user is banned before processing"""
+    
+    async def __call__(
+        self,
+        handler: Callable[[Message, Dict[str, Any]], Awaitable[Any]],
+        event: Message | CallbackQuery,
+        data: Dict[str, Any]
+    ) -> Any:
+        user_id = event.from_user.id
+        ban_info = await is_banned(user_id)
+        
+        if ban_info:
+            banned_until, reason = ban_info
+            hours_left = int((banned_until - __import__('datetime').datetime.now()).total_seconds() / 3600)
+            
+            ban_msg = (
+                f"🚫 You are banned\n\n"
+                f"Reason: {reason}\n"
+                f"Time remaining: {hours_left} hours"
+            )
+            
+            if isinstance(event, Message):
+                await event.answer(ban_msg)
+            else:
+                await event.answer(ban_msg, show_alert=True)
+            
+            return
+        
+        return await handler(event, data)
 
 
 # ============ START HANDLER ============
+start_router = Router()
+
 @start_router.message(CommandStart())
 async def cmd_start(message: Message):
     """Handle /start - show welcome or act as /find"""
@@ -87,6 +118,8 @@ async def select_gender(callback: CallbackQuery):
 
 
 # ============ MATCHMAKING HANDLERS ============
+matchmaking_router = Router()
+
 @matchmaking_router.message(Command("find"))
 async def cmd_find(message: Message):
     """Find a chat partner"""
@@ -142,8 +175,6 @@ async def select_preference(callback: CallbackQuery):
 
 async def start_matchmaking(bot, user_id: int, gender_pref: str = None):
     """Start matchmaking process"""
-    from db.users import get_user
-    
     # Transition to SEARCHING
     success = await transition_state(user_id, UserState.IDLE, UserState.SEARCHING)
     if not success:
@@ -278,6 +309,8 @@ async def cmd_stop(event):
 
 
 # ============ RATING HANDLERS ============
+rating_router = Router()
+
 async def show_rating_prompt(bot, rater_id: int, rated_user_id: int):
     """Show rating prompt"""
     builder = InlineKeyboardBuilder()
@@ -318,8 +351,26 @@ async def handle_rating(callback: CallbackQuery):
     await callback.answer()
 
 
+# ============ REGISTER ALL HANDLERS ============
 def register_all_handlers(dp: Dispatcher):
-    """Register all handlers"""
+    """Register all handlers with middleware"""
+    # Import other routers
+    from handlers.chat import router as chat_router
+    from handlers.games import router as games_router
+    from handlers.premium import router as premium_router
+    from handlers.profile import router as profile_router
+    from handlers.admin import router as admin_router
+    
+    # Add middleware
+    dp.message.middleware(BanCheckMiddleware())
+    dp.callback_query.middleware(BanCheckMiddleware())
+    
+    # Register routers in order
     dp.include_router(start_router)
     dp.include_router(matchmaking_router)
     dp.include_router(rating_router)
+    dp.include_router(premium_router)
+    dp.include_router(profile_router)
+    dp.include_router(games_router)
+    dp.include_router(admin_router)
+    dp.include_router(chat_router)  # Chat router last to catch all messages
