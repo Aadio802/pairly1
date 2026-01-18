@@ -21,7 +21,7 @@ async def init_database():
 
     conn = await get_connection()
     try:
-        with open(schema_path, 'r') as f:
+        with open(schema_path, "r") as f:
             schema = f.read()
 
         await conn.executescript(schema)
